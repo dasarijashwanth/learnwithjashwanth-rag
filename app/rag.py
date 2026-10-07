@@ -35,6 +35,11 @@ CHROMA_DIR = BASE_DIR / "data" / "chroma"
 COLLECTION_NAME = "learnwithjashwanth"
 EMBED_MODEL = "all-MiniLM-L6-v2"
 DEFAULT_TOP_K = 5
+# Day 5: cosine-distance gate. Chunks scoring worse (higher) than this are
+# treated as "the newsletter does not cover this". Calibrated on the Day 5
+# eval set: in-scope questions scored 0.31-0.72, out-of-scope/gibberish
+# scored 0.81-0.94 on the 3-post corpus. Override with RAG_RELEVANCE_THRESHOLD.
+RELEVANCE_THRESHOLD = float(os.environ.get("RAG_RELEVANCE_THRESHOLD", "0.78"))
 OPENAI_MODEL = os.environ.get("RAG_OPENAI_MODEL", "gpt-4o-mini")
 HF_MODEL = os.environ.get("RAG_HF_MODEL", "google/flan-t5-base")
 
@@ -100,13 +105,20 @@ class Retriever:
 
 SYSTEM_PROMPT = (
     "You are a helpful assistant that answers questions about the "
-    "'Learn with Jashwanth' newsletter using ONLY the context below.\n"
+    "'Learn with Jashwanth' newsletter using ONLY the numbered context "
+    "entries below.\n"
     "Rules:\n"
-    "- Answer in the newsletter's friendly, practical tone.\n"
-    "- Every factual claim must cite the chunk it came from as [1], [2], "
-    "etc., matching the numbered context entries.\n"
-    "- If the context does not cover the question, say so plainly and do "
-    "not invent details. Suggest what the newsletter does cover instead."
+    "- Answer in the newsletter's friendly, practical tone. Be concise.\n"
+    "- Attach a citation like [1] or [2] to EVERY factual sentence, "
+    "matching the numbered context entries. Never cite a number that was "
+    "not given to you.\n"
+    "- Never invent post titles, URLs, or details that are not in the "
+    "context.\n"
+    "- If the context covers only part of the question, answer that part "
+    "and plainly say which part is not covered.\n"
+    "- If the context does not cover the question at all, say so in one "
+    "sentence, do not invent details, and suggest what the newsletter "
+    "does cover instead."
 )
 
 
@@ -178,40 +190,56 @@ class OpenAIBackend(LLMBackend):
 
 
 class HFBackend(LLMBackend):
-    """Local HuggingFace seq2seq model (default flan-t5-base). No API key."""
+    """Local HuggingFace seq2seq model (default flan-t5-base). No API key.
+
+    Uses the tokenizer + model generate() API directly instead of the
+    text2text-generation pipeline alias, which newer transformers
+    versions removed (found during the Day 5 quality pass).
+    """
 
     name = "hf"
 
     def __init__(self, model_name: str = HF_MODEL) -> None:
-        from transformers import pipeline
-        self._pipe = pipeline("text2text-generation", model=model_name,
-                              max_new_tokens=512, do_sample=False)
+        from transformers import (AutoModelForSeq2SeqLM, AutoTokenizer)
+        self._tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self._model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
 
     def generate(self, question: str,
                  chunks: list[RetrievedChunk]) -> str:
+        import torch
         prompt = build_prompt(question, chunks)
-        out = self._pipe(prompt)
-        return out[0]["generated_text"].strip()
+        inputs = self._tokenizer(prompt, return_tensors="pt",
+                                 truncation=True, max_length=2048)
+        with torch.no_grad():
+            output_ids = self._model.generate(
+                **inputs, max_new_tokens=256, do_sample=False)
+        return self._tokenizer.decode(
+            output_ids[0], skip_special_tokens=True).strip()
 
 
 class ExtractiveBackend(LLMBackend):
     """No-LLM fallback: quotes the most relevant retrieved chunks verbatim.
 
-    Guarantees a grounded, cited answer when no LLM is available or the
-    user wants a pure retrieval baseline (Day 5 eval compares against it).
+    Quotes each chunk's lead (~120 words), which carries the key point,
+    instead of rewriting. Always works offline; useful for tests and
+    fallback. Day 5 eval compares LLM backends against it.
+
+    (Day 5 note: a query-term sentence-selection variant was tried and
+    reverted — on this corpus the lead consistently covered more of the
+    expected answer keywords than overlap-ranked sentences.)
     """
 
     name = "extractive"
+    SNIPPET_WORDS = 120
 
     def generate(self, question: str,
                  chunks: list[RetrievedChunk]) -> str:
-        sentences = []
+        parts = []
         for i, chunk in enumerate(chunks[:3]):
             text = re.sub(r"\s+", " ", chunk.text).strip()
-            # Keep the opening, which usually carries the key point.
-            snippet = " ".join(text.split()[:80])
-            sentences.append(f"[{i + 1}] {snippet}...")
-        body = "\n\n".join(sentences)
+            snippet = " ".join(text.split()[:self.SNIPPET_WORDS])
+            parts.append(f"[{i + 1}] {snippet}...")
+        body = "\n\n".join(parts)
         return ("Based on the newsletter, here is what I found:\n\n"
                 f"{body}\n\n"
                 "This is a retrieval-only answer: it quotes the most "
@@ -241,11 +269,17 @@ def get_backend(name: str = "auto") -> LLMBackend:
 # ---------------------------------------------------------------------------
 
 def answer_question(question: str, top_k: int = DEFAULT_TOP_K,
-                    backend: str = "auto") -> Answer:
+                    backend: str = "auto",
+                    max_distance: float = RELEVANCE_THRESHOLD) -> Answer:
     """Retrieve relevant chunks and generate a cited answer.
 
     Returns an Answer with .text (citations as [1], [2], ...) and .sources
     (the RetrievedChunk list the numbers refer to).
+
+    Relevance gate (Day 5): if even the best chunk scores worse than
+    max_distance, the newsletter is treated as not covering the question
+    and a graceful abstention is returned instead of answering from
+    irrelevant passages.
     """
     retriever = Retriever()
     if not question.strip():
@@ -255,6 +289,16 @@ def answer_question(question: str, top_k: int = DEFAULT_TOP_K,
         return Answer(text="The index is empty. Run scripts/ingest.py and "
                            "scripts/build_index.py first.",
                       backend=backend)
+    if chunks[0].score > max_distance:
+        topics = ", ".join(f"'{t}'" for t in
+                           dict.fromkeys(c.title for c in chunks))
+        return Answer(
+            text=("The Learn with Jashwanth newsletter does not cover "
+                  f"that topic. So far it covers: {topics}. "
+                  "Try asking about one of those."),
+            sources=[],
+            backend="relevance-gate",
+        )
     llm = get_backend(backend)
     text = llm.generate(question, chunks)
     return Answer(text=text, sources=chunks, backend=llm.name)
