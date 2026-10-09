@@ -1,0 +1,12 @@
+# Day 7: deploy-ready Streamlit config.
+# Matches Jashwanth's newsletter cover branding (cream / navy / amber).
+
+[theme]
+primaryColor = "#F2B705"
+backgroundColor = "#FDFBF0"
+secondaryBackgroundColor = "#EFEAD6"
+textColor = "#0B1030"
+font = "sans serif"
+
+[server]
+headless = true

@@ -83,14 +83,14 @@ class RetrievedChunk:
 
 
 class Retriever:
-    """Loads the Day 2 ChromaDB index once, then answers similarity queries."""
+    """Loads the Day 2 ChromaDB index once, then answers similarity queries.
+
+    Day 7: self-healing index. On a fresh deploy (e.g. Streamlit Cloud) the
+    chroma directory is not committed, so if it is missing the index is
+    built automatically from the committed data/posts.json on first use.
+    """
 
     def __init__(self) -> None:
-        if not CHROMA_DIR.exists():
-            raise IndexNotFoundError(
-                f"Index not found at {CHROMA_DIR}. "
-                "Run scripts/build_index.py first."
-            )
         try:
             from sentence_transformers import SentenceTransformer
             import chromadb
@@ -99,6 +99,8 @@ class Retriever:
                 "Required packages are missing. "
                 "Run: pip install -r requirements.txt"
             ) from exc
+        if not CHROMA_DIR.exists():
+            self._build_index_from_posts()
         try:
             self._embedder = SentenceTransformer(EMBED_MODEL)
         except Exception as exc:
@@ -113,6 +115,34 @@ class Retriever:
             raise IndexNotFoundError(
                 f"Could not open the index at {CHROMA_DIR}. "
                 "It may be corrupted; try scripts/build_index.py --recreate."
+            ) from exc
+
+    @staticmethod
+    def _build_index_from_posts() -> None:
+        """Build the vector index from data/posts.json when it is missing.
+
+        This is what makes the repo deploy-ready: the chroma directory is
+        gitignored, so a fresh checkout (Streamlit Cloud, a new machine)
+        has no index. The posts file is committed, so the index can be
+        rebuilt here on the fly instead of crashing with IndexNotFound.
+        """
+        posts_path = BASE_DIR / "data" / "posts.json"
+        if not posts_path.exists():
+            raise IndexNotFoundError(
+                f"Index not found at {CHROMA_DIR} and no {posts_path} "
+                "to build one from. Run scripts/ingest.py, then "
+                "scripts/build_index.py."
+            )
+        try:
+            if str(BASE_DIR) not in sys.path:
+                sys.path.insert(0, str(BASE_DIR))
+            from scripts.build_index import build_index
+            build_index()
+        except (Exception, SystemExit) as exc:
+            # build_index signals fatal errors via SystemExit.
+            raise IndexNotFoundError(
+                f"No index at {CHROMA_DIR} and the automatic build "
+                f"failed: {exc}. Run scripts/build_index.py manually."
             ) from exc
 
     def retrieve(self, query: str, top_k: int = DEFAULT_TOP_K

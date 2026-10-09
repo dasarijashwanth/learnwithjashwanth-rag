@@ -85,6 +85,23 @@ To run the eval:
 python eval/run_eval.py
 ```
 
+## Deploy to Streamlit Cloud
+
+The repo is deploy-ready: no secrets are required, and the vector index
+(`data/chroma/`, gitignored) rebuilds itself from the committed
+`data/posts.json` on first launch, so a fresh checkout just works.
+
+1. Push the repo to GitHub (`dasarijashwanth/learnwithjashwanth-rag`).
+2. Go to [share.streamlit.io](https://share.streamlit.io) → New app →
+   pick the repo, branch `main`, main file path `app/app.py`.
+3. (Optional, best answers) Add a secret: `OPENAI_API_KEY = "..."` in the
+   app's Secrets panel. Without it the app falls back to the local
+   HuggingFace backend, then to the extractive backend. Nothing breaks.
+4. Deploy. First load builds the index (~a minute) and caches it.
+
+> Demo URL goes here after the first deploy:
+> **https://learnwithjashwanth-rag.streamlit.app**
+
 ## Eval results (Day 5 quality pass)
 
 | Metric | Before tuning | After tuning |
