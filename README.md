@@ -12,6 +12,11 @@ Built as Week 1 of a weekly portfolio project series: one production-grade data/
 ## Features
 
 - **Bring your own content.** PDF / TXT / Markdown uploads, web page URLs (article text extraction), and pasted text, all indexed into your own collection from the sidebar.
+- **Hybrid search.** Dense vector search fused with BM25 keyword search via Reciprocal Rank Fusion: semantic understanding plus exact-term matching (function names, error codes, jargon).
+- **Cross-encoder reranking.** Top candidates are re-scored by a model that reads the query and chunk together, for meaningfully better precision than bi-encoder retrieval alone. Toggleable in the sidebar.
+- **Conversational follow-ups.** Short follow-ups like "tell me more" are expanded with the previous question for retrieval, and LLM backends see the last exchange for context.
+- **Streaming answers.** OpenAI-backend answers stream token by token instead of making you wait.
+- **Retrieval transparency.** Every source shows its relevance scores (vector distance, rerank score) so you can see *why* it was cited.
 - **Grounded answers with citations.** Every factual claim links back to the exact source it came from (title + URL).
 - **Honest abstention.** A relevance gate (cosine distance threshold, calibrated on the eval set) makes the bot say "not covered" instead of inventing answers for out-of-scope questions.
 - **Two answer backends.** Extractive (deterministic, no API key) and HuggingFace seq2seq, switchable from the UI sidebar.

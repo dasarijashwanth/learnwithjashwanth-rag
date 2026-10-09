@@ -81,6 +81,8 @@ class RetrievedChunk:
     url: str
     published: str
     score: float  # cosine distance from Chroma (lower = closer)
+    rerank_score: float = 0.0  # cross-encoder score (higher = better)
+    chunk_id: str = ""  # chroma id, used for hybrid fusion
 
 
 class Retriever:
@@ -155,6 +157,13 @@ class Retriever:
     def retrieve(self, query: str, top_k: int = DEFAULT_TOP_K
                  ) -> list[RetrievedChunk]:
         """Return the top_k most relevant chunks for the query."""
+        return [c for _, c in
+                self._retrieve_with_ids(query, top_k=top_k)]
+
+    def _retrieve_with_ids(
+            self, query: str,
+            top_k: int = DEFAULT_TOP_K) -> list[tuple[str, RetrievedChunk]]:
+        """Dense retrieval returning (chroma_id, chunk) pairs."""
         query = query.strip()
         if not query:
             return []
@@ -163,18 +172,94 @@ class Retriever:
             query_embeddings=[embedding],
             n_results=min(top_k, max(1, self._collection.count())),
         )
-        chunks = []
-        for doc, meta, dist in zip(results["documents"][0],
-                                   results["metadatas"][0],
-                                   results["distances"][0]):
-            chunks.append(RetrievedChunk(
+        out = []
+        for cid, doc, meta, dist in zip(results["ids"][0],
+                                        results["documents"][0],
+                                        results["metadatas"][0],
+                                        results["distances"][0]):
+            out.append((cid, RetrievedChunk(
                 text=doc,
                 title=meta.get("title", "Untitled"),
                 url=meta.get("url", ""),
                 published=meta.get("published", ""),
                 score=float(dist),
-            ))
-        return chunks
+                chunk_id=cid,
+            )))
+        return out
+
+    # -- Hybrid search (dense + BM25) ------------------------------------
+
+    @staticmethod
+    def _tokenize(text: str) -> list[str]:
+        return re.findall(r"[a-z0-9]+", text.lower())
+
+    def _bm25_index(self):
+        """Build (and cache) a BM25 index over the collection's chunks.
+
+        Rebuilt automatically when the chunk count changes, so newly
+        added documents are searchable immediately.
+        """
+        count = self._collection.count()
+        if (getattr(self, "_bm25_built_for", -1) == count
+                and hasattr(self, "_bm25")):
+            return self._bm25, self._bm25_items
+        try:
+            from rank_bm25 import BM25Okapi
+        except ImportError as exc:
+            raise ModelLoadError(
+                "Hybrid search needs the 'rank-bm25' package. "
+                "Run: pip install -r requirements.txt"
+            ) from exc
+        data = self._collection.get(include=["documents", "metadatas"])
+        items, corpus = [], []
+        for cid, doc, meta in zip(data["ids"], data["documents"],
+                                  data["metadatas"]):
+            items.append({"id": cid, "doc": doc, "meta": meta})
+            # Title gets extra weight: repeat it so title terms count more.
+            corpus.append(self._tokenize(
+                f"{meta.get('title', '')} {meta.get('title', '')} {doc}"))
+        self._bm25 = BM25Okapi(corpus) if corpus else None
+        self._bm25_items = items
+        self._bm25_built_for = count
+        return self._bm25, self._bm25_items
+
+    def hybrid_retrieve(self, query: str, top_k: int = DEFAULT_TOP_K,
+                        dense_k: int = 20, bm25_k: int = 20
+                        ) -> list[RetrievedChunk]:
+        """Fuse dense vector search and BM25 keyword search (RRF).
+
+        Dense search catches meaning ("ways to clean data"), BM25 catches
+        exact terms ("pandas read_excel"). Reciprocal Rank Fusion merges
+        both ranked lists without needing comparable scores.
+        """
+        dense = self._retrieve_with_ids(query, top_k=dense_k)
+        rrf: dict[str, float] = {}
+        seen: dict[str, RetrievedChunk] = {}
+        for rank, (cid, chunk) in enumerate(dense):
+            rrf[cid] = rrf.get(cid, 0.0) + 1.0 / (60 + rank)
+            seen[cid] = chunk
+        bm25, items = self._bm25_index()
+        if bm25 is not None:
+            scores = bm25.get_scores(self._tokenize(query))
+            ranked = sorted(range(len(scores)),
+                            key=lambda i: scores[i], reverse=True)[:bm25_k]
+            for rank, i in enumerate(ranked):
+                if scores[i] <= 0:
+                    continue
+                cid = items[i]["id"]
+                rrf[cid] = rrf.get(cid, 0.0) + 1.0 / (60 + rank)
+                if cid not in seen:
+                    meta = items[i]["meta"]
+                    seen[cid] = RetrievedChunk(
+                        text=items[i]["doc"],
+                        title=meta.get("title", "Untitled"),
+                        url=meta.get("url", ""),
+                        published=meta.get("published", ""),
+                        score=1.0,  # BM25-only hit: no dense distance
+                        chunk_id=cid,
+                    )
+        fused = sorted(rrf.items(), key=lambda kv: kv[1], reverse=True)
+        return [seen[cid] for cid, _ in fused[:top_k]]
 
 
 # ---------------------------------------------------------------------------
@@ -259,6 +344,57 @@ def clear_collection(collection_name: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Reranking
+# ---------------------------------------------------------------------------
+
+_reranker = None
+
+
+def get_reranker():
+    """Lazily load the cross-encoder reranker (cached for the process)."""
+    global _reranker
+    if _reranker is None:
+        try:
+            from sentence_transformers import CrossEncoder
+        except ImportError as exc:
+            raise ModelLoadError(
+                "Reranking needs the 'sentence-transformers' package. "
+                "Run: pip install -r requirements.txt"
+            ) from exc
+        try:
+            _reranker = CrossEncoder(
+                "cross-encoder/ms-marco-MiniLM-L-6-v2")
+        except Exception as exc:
+            raise ModelLoadError(
+                "Could not load the reranker model. "
+                "Check your network connection and try again."
+            ) from exc
+    return _reranker
+
+
+def rerank(query: str, chunks: list[RetrievedChunk],
+           top_k: int) -> list[RetrievedChunk]:
+    """Reorder candidates with a cross-encoder (query, chunk) scorer.
+
+    Bi-encoder retrieval is fast but shallow; the cross-encoder reads the
+    query and chunk together and is far better at judging true relevance.
+    Runs over a wider candidate pool, then keeps the best top_k.
+    """
+    if len(chunks) <= top_k:
+        return chunks
+    model = get_reranker()
+    pairs = [(query, c.text) for c in chunks]
+    scores = model.predict(pairs, show_progress_bar=False)
+    ranked = sorted(zip(chunks, scores), key=lambda x: float(x[1]),
+                    reverse=True)
+    out = []
+    for chunk, s in ranked[:top_k]:
+        chunk.rerank_score = float(s)
+        out.append(chunk)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Prompt
 # ---------------------------------------------------------------------------
 
@@ -308,8 +444,8 @@ class LLMBackend:
 
     name = "base"
 
-    def generate(self, question: str,
-                 chunks: list[RetrievedChunk]) -> str:
+    def generate(self, question: str, chunks: list[RetrievedChunk],
+                 history_note: str = "") -> str:
         raise NotImplementedError
 
 
@@ -330,21 +466,42 @@ class OpenAIBackend(LLMBackend):
         self._client = OpenAI()
         self._model = model
 
-    def generate(self, question: str,
-                 chunks: list[RetrievedChunk]) -> str:
+    def generate(self, question: str, chunks: list[RetrievedChunk],
+                 history_note: str = "") -> str:
         response = self._client.chat.completions.create(
             model=self._model,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user",
-                 "content": "Context:\n" + "\n\n".join(
+                 "content": (history_note + "Context:\n" + "\n\n".join(
                      f"[{i + 1}] {c.title}\n{c.text}"
                      for i, c in enumerate(chunks))
-                 + f"\n\nQuestion: {question}"},
+                 + f"\n\nQuestion: {question}")},
             ],
             temperature=0.2,
         )
         return response.choices[0].message.content.strip()
+
+    def generate_stream(self, question: str, chunks: list[RetrievedChunk],
+                        history_note: str = ""):
+        """Yield answer tokens as they arrive (OpenAI streaming)."""
+        stream = self._client.chat.completions.create(
+            model=self._model,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user",
+                 "content": (history_note + "Context:\n" + "\n\n".join(
+                     f"[{i + 1}] {c.title}\n{c.text}"
+                     for i, c in enumerate(chunks))
+                 + f"\n\nQuestion: {question}")},
+            ],
+            temperature=0.2,
+            stream=True,
+        )
+        for event in stream:
+            delta = event.choices[0].delta.content
+            if delta:
+                yield delta
 
 
 class HFBackend(LLMBackend):
@@ -363,9 +520,11 @@ class HFBackend(LLMBackend):
         self._model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
 
     def generate(self, question: str,
-                 chunks: list[RetrievedChunk]) -> str:
+                 chunks: list[RetrievedChunk],
+                 history_note: str = "") -> str:
         import torch
-        prompt = build_prompt(question, chunks)
+        prompt = (history_note + build_prompt(question, chunks)
+                  if history_note else build_prompt(question, chunks))
         inputs = self._tokenizer(prompt, return_tensors="pt",
                                  truncation=True, max_length=2048)
         with torch.no_grad():
@@ -391,14 +550,15 @@ class ExtractiveBackend(LLMBackend):
     SNIPPET_WORDS = 120
 
     def generate(self, question: str,
-                 chunks: list[RetrievedChunk]) -> str:
+                 chunks: list[RetrievedChunk],
+                 history_note: str = "") -> str:
         parts = []
         for i, chunk in enumerate(chunks[:3]):
             text = re.sub(r"\s+", " ", chunk.text).strip()
             snippet = " ".join(text.split()[:self.SNIPPET_WORDS])
             parts.append(f"[{i + 1}] {snippet}...")
         body = "\n\n".join(parts)
-        return ("Based on the newsletter, here is what I found:\n\n"
+        return ("Based on the collection, here is what I found:\n\n"
                 f"{body}\n\n"
                 "This is a retrieval-only answer: it quotes the most "
                 "relevant passages instead of rewriting them.")
@@ -447,28 +607,58 @@ def _init_backend(cls: type[LLMBackend]) -> LLMBackend:
 # Main answering entry point
 # ---------------------------------------------------------------------------
 
-def answer_question(question: str, top_k: int = DEFAULT_TOP_K,
-                    backend: str = "auto",
-                    max_distance: float = RELEVANCE_THRESHOLD,
-                    retriever: "Retriever | None" = None,
-                    collection_label: str = "this collection") -> Answer:
-    """Retrieve relevant chunks and generate a cited answer.
+def resolve_backend_name(backend: str = "auto") -> str:
+    """Return the concrete backend name without instantiating it."""
+    backend = (backend or "auto").lower()
+    if backend == "openai":
+        return "openai"
+    if backend == "hf":
+        return "hf"
+    if backend == "extractive":
+        return "extractive"
+    # auto: OpenAI if a key is set, else local HuggingFace, else extractive
+    if os.environ.get("OPENAI_API_KEY"):
+        return "openai"
+    try:
+        import transformers  # noqa: F401
+        return "hf"
+    except ImportError:
+        return "extractive"
 
-    Returns an Answer with .text (citations as [1], [2], ...) and .sources
-    (the RetrievedChunk list the numbers refer to).
 
-    Relevance gate (Day 5): if even the best chunk scores worse than
-    max_distance, the collection is treated as not covering the question
-    and a graceful abstention is returned instead of answering from
-    irrelevant passages.
+def _expand_followup(question: str,
+                     history: "list[dict] | None") -> str:
+    """Make short follow-up questions standalone for retrieval.
 
-    Day 6: pass an already-loaded Retriever to skip reloading the
-    embedding model on every call. Raises ValueError on invalid input
-    and RAGError subclasses on index/model/backend failures.
+    "tell me more" alone retrieves nothing useful; "tell me more" +
+    the previous question retrieves the right neighborhood. Long,
+    self-contained questions pass through untouched.
+    """
+    if not history or len(question.split()) > 12:
+        return question
+    last_q = (history[-1].get("question") or "").strip()
+    if not last_q:
+        return question
+    return f"{last_q} {question}"
+
+
+def _gather(question: str, top_k: int, max_distance: float,
+            retriever: "Retriever | None",
+            collection_label: str,
+            history: "list[dict] | None",
+            use_hybrid: bool,
+            use_rerank: bool) -> tuple[str, list[RetrievedChunk],
+                                       "Answer | None"]:
+    """Shared retrieval pipeline for the answer and stream entry points.
+
+    Returns (standalone_question, prompt_chunks, gate_answer). When
+    gate_answer is not None, retrieval decided the question is out of
+    scope (or input was empty) and it should be returned directly.
     """
     question = (question or "").strip()
     if not question:
-        return Answer(text="Please ask a question.", backend=backend)
+        return question, [], Answer(text="Please ask a question.",
+                                    backend="none")
     if len(question) > MAX_QUESTION_CHARS:
         raise ValueError(
             f"Question is too long ({len(question)} chars; "
@@ -479,24 +669,125 @@ def answer_question(question: str, top_k: int = DEFAULT_TOP_K,
             f"top_k must be between 1 and {MAX_TOP_K}, got {top_k}."
         )
     retriever = retriever or Retriever()
-    chunks = retriever.retrieve(question, top_k=top_k)
-    if not chunks:
-        return Answer(text=("This collection is empty. Add some documents "
-                            "first, then ask away."),
-                      backend=backend)
-    if chunks[0].score > max_distance:
+    standalone = _expand_followup(question, history)
+    if use_hybrid:
+        try:
+            candidates = retriever.hybrid_retrieve(
+                standalone, top_k=max(top_k * 4, 20))
+        except (ModelLoadError, RAGError):
+            candidates = retriever.retrieve(standalone,
+                                            top_k=max(top_k * 4, 20))
+    else:
+        candidates = retriever.retrieve(standalone,
+                                        top_k=max(top_k * 4, 20))
+    if not candidates:
+        return standalone, [], Answer(
+            text=("This collection is empty. Add some documents "
+                  "first, then ask away."),
+            backend="none")
+    # Relevance gate (Day 5): judged on the best dense cosine distance,
+    # which is what the threshold was calibrated on.
+    if candidates[0].score > max_distance:
         topics = ", ".join(f"'{t}'" for t in
-                           dict.fromkeys(c.title for c in chunks))
-        return Answer(
+                           dict.fromkeys(c.title for c in candidates))
+        return standalone, [], Answer(
             text=(f"{collection_label} does not cover "
                   f"that topic. So far it covers: {topics}. "
                   "Try asking about one of those."),
             sources=[],
             backend="relevance-gate",
         )
+    chunks = (rerank(standalone, candidates, top_k) if use_rerank
+              else candidates[:top_k])
+    return standalone, chunks, None
+
+
+def _history_block(history: "list[dict] | None") -> str:
+    """Format the last exchange so LLM backends resolve follow-ups."""
+    if not history:
+        return ""
+    last = history[-1]
+    q = (last.get("question") or "")[:500]
+    a = (last.get("answer") or "")[:800]
+    if not q:
+        return ""
+    return (f"Previous exchange (for context on follow-up questions):\n"
+            f"Q: {q}\nA: {a}\n\n")
+
+
+def answer_question(question: str, top_k: int = DEFAULT_TOP_K,
+                    backend: str = "auto",
+                    max_distance: float = RELEVANCE_THRESHOLD,
+                    retriever: "Retriever | None" = None,
+                    collection_label: str = "this collection",
+                    history: "list[dict] | None" = None,
+                    use_hybrid: bool = True,
+                    use_rerank: bool = True) -> Answer:
+    """Retrieve relevant chunks and generate a cited answer.
+
+    Returns an Answer with .text (citations as [1], [2], ...) and .sources
+    (the RetrievedChunk list the numbers refer to).
+
+    Advanced retrieval: hybrid dense + BM25 search fused with RRF, then a
+    cross-encoder rerank over a wide candidate pool. Short follow-up
+    questions are expanded with the previous question for retrieval, and
+    LLM backends see the last exchange for conversational context.
+
+    Day 6: pass an already-loaded Retriever to skip reloading the
+    embedding model on every call. Raises ValueError on invalid input
+    and RAGError subclasses on index/model/backend failures.
+    """
+    standalone, chunks, gate = _gather(
+        question, top_k, max_distance, retriever, collection_label,
+        history, use_hybrid, use_rerank)
+    if gate is not None:
+        return gate
     llm = get_backend(backend)
-    text = llm.generate(question, chunks)
+    context_note = _history_block(history)
+    text = llm.generate(standalone, chunks,
+                        history_note=context_note)
     return Answer(text=text, sources=chunks, backend=llm.name)
+
+
+def answer_question_stream(question: str, top_k: int = DEFAULT_TOP_K,
+                           backend: str = "auto",
+                           max_distance: float = RELEVANCE_THRESHOLD,
+                           retriever: "Retriever | None" = None,
+                           collection_label: str = "this collection",
+                           history: "list[dict] | None" = None,
+                           use_hybrid: bool = True,
+                           use_rerank: bool = True):
+    """Streaming variant of answer_question.
+
+    Yields (event, payload) tuples: ("meta", Answer-with-empty-text) once
+    the sources are known, then ("token", str) for each streamed token,
+    then ("done", Answer). Falls back to non-streaming for backends
+    without stream support.
+    """
+    standalone, chunks, gate = _gather(
+        question, top_k, max_distance, retriever, collection_label,
+        history, use_hybrid, use_rerank)
+    if gate is not None:
+        yield "done", gate
+        return
+    name = resolve_backend_name(backend)
+    if name != "openai":
+        llm = get_backend(backend)
+        text = llm.generate(standalone, chunks,
+                            history_note=_history_block(history))
+        yield "done", Answer(text=text, sources=chunks,
+                             backend=llm.name)
+        return
+    llm = _init_backend(OpenAIBackend)
+    meta = Answer(text="", sources=chunks, backend=llm.name)
+    yield "meta", meta
+    full = []
+    for tok in llm.generate_stream(standalone, chunks,
+                                   history_note=_history_block(history)):
+        full.append(tok)
+        yield "token", tok
+    yield "done", Answer(text="".join(full), sources=chunks,
+                         backend=llm.name)
 
 
 def format_answer(answer: Answer) -> str:

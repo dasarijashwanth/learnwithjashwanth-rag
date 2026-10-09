@@ -20,7 +20,8 @@ import traceback
 import streamlit as st
 
 from rag import (COLLECTION_NAME, RAGError, Retriever, USER_COLLECTION_NAME,
-                 answer_question, clear_collection, index_documents)
+                 answer_question, answer_question_stream, clear_collection,
+                 index_documents, resolve_backend_name)
 from sources import extract_upload, fetch_url, make_text_document
 
 # ---------------------------------------------------------------------------
@@ -82,21 +83,30 @@ def get_retriever(collection_name: str) -> Retriever:
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def get_answer(question: str, top_k: int, backend: str,
-               collection_name: str, collection_label: str) -> dict:
+               collection_name: str, collection_label: str,
+               use_hybrid: bool, use_rerank: bool,
+               history: tuple = ()) -> dict:
     """Answer a question, cached for an hour.
 
     The retriever is intentionally NOT a cache key: the single shared
     resource from get_retriever() is reused, so repeat questions cost
     only one embedding + LLM call, and identical repeats cost nothing.
     Returns a plain dict so Streamlit can serialize the cache entry.
+    history is a tuple of (question, answer) pairs for follow-up context.
     """
+    hist = [{"question": q, "answer": a} for q, a in history]
     answer = answer_question(question, top_k=top_k, backend=backend,
                              retriever=get_retriever(collection_name),
-                             collection_label=collection_label)
+                             collection_label=collection_label,
+                             history=hist or None,
+                             use_hybrid=use_hybrid,
+                             use_rerank=use_rerank)
     return {
         "text": answer.text,
         "backend": answer.backend,
-        "sources": [{"title": s.title, "url": s.url}
+        "sources": [{"title": s.title, "url": s.url,
+                     "score": round(s.score, 3),
+                     "rerank_score": round(s.rerank_score, 3)}
                     for s in answer.sources],
     }
 
@@ -146,6 +156,19 @@ with st.sidebar:
     )
     top_k = st.slider("Chunks to retrieve", min_value=1, max_value=10,
                       value=5)
+
+    st.divider()
+    st.header("🔬 Retrieval")
+    use_hybrid = st.checkbox("Hybrid search (vectors + keywords)",
+                             value=True,
+                             help="Fuses semantic vector search with BM25 "
+                                  "keyword search. Better for exact terms "
+                                  "like function names.")
+    use_rerank = st.checkbox("Rerank results",
+                             value=True,
+                             help="Re-scores top candidates with a "
+                                  "cross-encoder for better precision. "
+                                  "Slightly slower.")
 
     st.divider()
     st.header("📚 Index")
@@ -271,6 +294,42 @@ for msg in st.session_state.messages:
                     else:
                         st.markdown(f"- {label}")
 
+def _source_lines(sources):
+    """Render the Sources expander with per-source relevance."""
+    for i, src in enumerate(sources):
+        label = f"[{i + 1}] {src['title']}"
+        if src["url"]:
+            st.markdown(f"- [{label}]({src['url']})")
+        else:
+            st.markdown(f"- {label}")
+        rel = []
+        if src.get("score") is not None:
+            rel.append(f"distance {src['score']:.3f}")
+        if src.get("rerank_score"):
+            rel.append(f"rerank {src['rerank_score']:.2f}")
+        if rel:
+            st.caption(" · ".join(rel))
+
+
+def _history_pairs():
+    """Last two Q/A exchanges as (question, answer) tuples."""
+    pairs = []
+    msgs = st.session_state.messages
+    for i in range(0, len(msgs) - 1, 2):
+        if (msgs[i]["role"] == "user"
+                and msgs[i + 1]["role"] == "assistant"):
+            pairs.append((msgs[i]["text"], msgs[i + 1]["text"]))
+    return tuple(pairs[-2:])
+
+
+def _src_dicts(sources):
+    """Serialize RetrievedChunk list for session state / cache."""
+    return [{"title": s.title, "url": s.url,
+             "score": round(s.score, 3),
+             "rerank_score": round(s.rerank_score, 3)}
+            for s in sources]
+
+
 # New question: typed or picked from suggestions
 question = st.chat_input(cfg["placeholder"], max_chars=2000)
 pending = st.session_state.pop("pending_question", None)
@@ -281,31 +340,66 @@ if question:
     with st.chat_message("user"):
         st.markdown(question)
 
+    history = _history_pairs()
+    hist_dicts = [{"question": q, "answer": a}
+                  for q, a in history] or None
+    stream = resolve_backend_name(backend) == "openai"
     with st.chat_message("assistant"):
-        with st.spinner(cfg["spinner"]):
-            started = time.perf_counter()
-            try:
-                result = get_answer(question, top_k=top_k,
-                                    backend=backend,
-                                    collection_name=cfg["collection"],
-                                    collection_label=cfg["collection_label"])
-            except (RAGError, ValueError) as exc:
-                st.error(f"Could not answer: {exc}")
-                st.stop()
-            except Exception as exc:
-                show_error(exc)
-                st.stop()
-            elapsed = time.perf_counter() - started
-        st.markdown(result["text"])
+        started = time.perf_counter()
+        try:
+            if stream:
+                # Streaming path (OpenAI): tokens render live, not cached.
+                box: dict = {}
+
+                def _tokens():
+                    events = answer_question_stream(
+                        question, top_k=top_k, backend=backend,
+                        retriever=get_retriever(cfg["collection"]),
+                        collection_label=cfg["collection_label"],
+                        history=hist_dicts,
+                        use_hybrid=use_hybrid, use_rerank=use_rerank)
+                    for event, payload in events:
+                        if event == "meta":
+                            box["sources"] = _src_dicts(payload.sources)
+                            box["backend"] = payload.backend
+                        elif event == "token":
+                            box["streamed"] = True
+                            yield payload
+                        elif event == "done":
+                            box["backend"] = payload.backend
+                            box.setdefault(
+                                "sources", _src_dicts(payload.sources))
+                            if not box.get("streamed"):
+                                box["gate_text"] = payload.text
+
+                text = st.write_stream(_tokens())
+                if not text and box.get("gate_text"):
+                    # Relevance-gate / empty answers don't stream.
+                    st.markdown(box["gate_text"])
+                    text = box["gate_text"]
+                result = {"text": text,
+                          "backend": box.get("backend", "openai"),
+                          "sources": box.get("sources", [])}
+            else:
+                with st.spinner(cfg["spinner"]):
+                    result = get_answer(
+                        question, top_k=top_k, backend=backend,
+                        collection_name=cfg["collection"],
+                        collection_label=cfg["collection_label"],
+                        use_hybrid=use_hybrid, use_rerank=use_rerank,
+                        history=history)
+                st.markdown(result["text"])
+        except (RAGError, ValueError) as exc:
+            st.error(f"Could not answer: {exc}")
+            st.stop()
+        except Exception as exc:
+            show_error(exc)
+            st.stop()
+        elapsed = time.perf_counter() - started
         sources = result["sources"]
         if sources:
             with st.expander("Sources"):
-                for i, src in enumerate(sources):
-                    label = f"[{i + 1}] {src['title']}"
-                    if src["url"]:
-                        st.markdown(f"- [{label}]({src['url']})")
-                    else:
-                        st.markdown(f"- {label}")
+                _source_lines(sources)
         cached_note = " ⚡ served from cache" if elapsed < 0.2 else ""
         st.caption(f"backend: {result['backend']} · "
                    f"{elapsed:.1f}s{cached_note}")
