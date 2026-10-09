@@ -4,7 +4,6 @@ A retrieval-augmented generation chatbot that answers questions grounded in the 
 
 Built as Week 1 of a weekly portfolio project series: one production-grade data/AI project per week, built in daily slices.
 
-![Animated walkthrough of the chatbot](docs/demo.gif)
 
 ## Features
 
