@@ -4,6 +4,8 @@ A retrieval-augmented generation chatbot that answers questions grounded in the 
 
 Built as Week 1 of a weekly portfolio project series: one production-grade data/AI project per week, built in daily slices.
 
+![Animated walkthrough of the chatbot](docs/demo.gif)
+
 ## Features
 
 - **Grounded answers with citations.** Every factual claim links back to the exact newsletter post it came from (title + URL).
@@ -11,6 +13,8 @@ Built as Week 1 of a weekly portfolio project series: one production-grade data/
 - **Two answer backends.** Extractive (deterministic, no API key) and HuggingFace seq2seq, switchable from the UI sidebar.
 - **Streamlit chat UI.** Suggested starter questions, cited Sources expander per answer, chunk-count slider, and index stats in the sidebar.
 - **Eval harness.** 10-question eval set measuring retrieval hit rate, keyword coverage, citation presence, abstention behavior, and crash-freedom, with before/after tuning results.
+- **Answer caching.** The Streamlit UI caches answers (per question + backend + top-k) and shares one loaded retriever across calls, so repeat questions are instant and no model is reloaded per question.
+- **Friendly error handling.** Typed errors (`IndexNotFoundError`, `ModelLoadError`, `BackendError`) surface actionable messages; the UI keeps chat history intact and offers a clear-cache-and-retry action.
 
 ## How it works
 
@@ -43,7 +47,10 @@ Substack RSS  →  ingest  →  chunk + embed  →  ChromaDB index  →  retriev
 │   └── rag.py          # retrieval + answer engine, relevance gate, backends
 ├── scripts/
 │   ├── ingest.py       # RSS → data/posts.json
-│   └── build_index.py  # chunk + embed → ChromaDB
+│   ├── build_index.py  # chunk + embed → ChromaDB
+│   └── make_demo_gif.py # renders the walkthrough GIF in docs/
+├── docs/
+│   └── demo.gif        # animated walkthrough of the app
 ├── eval/
 │   ├── eval_questions.json  # 10-question eval set
 │   ├── run_eval.py          # eval harness

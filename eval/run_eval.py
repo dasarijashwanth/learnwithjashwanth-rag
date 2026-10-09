@@ -51,7 +51,8 @@ def evaluate(backend: str) -> dict:
         try:
             chunks = retriever.retrieve(q["question"], top_k=5)
             answer = answer_question(q["question"], top_k=5,
-                                     backend=backend)
+                                     backend=backend,
+                                     retriever=retriever)  # Day 6: reuse
             row["crashed"] = False
             row["error"] = None
             titles = [c.title for c in chunks]

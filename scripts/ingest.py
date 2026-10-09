@@ -21,8 +21,24 @@ def clean_html(html: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def fetch_feed(url: str):
+    """Fetch and parse the RSS feed, failing loudly on network errors."""
+    feed = feedparser.parse(url)
+    if getattr(feed, "bozo", False) and not feed.entries:
+        reason = getattr(feed, "bozo_exception", "unknown error")
+        raise RuntimeError(
+            f"Could not fetch the feed at {url}: {reason}. "
+            "Check your network connection and that the URL is correct."
+        )
+    return feed
+
+
 def main() -> None:
-    feed = feedparser.parse(FEED_URL)
+    try:
+        feed = fetch_feed(FEED_URL)
+    except RuntimeError as exc:
+        print(f"Error: {exc}")
+        raise SystemExit(1)
     posts = []
     for entry in feed.entries:
         content = ""
@@ -39,6 +55,10 @@ def main() -> None:
             }
         )
     posts = [p for p in posts if p["text"]]
+    if not posts:
+        print(f"Error: no posts found in the feed at {FEED_URL}. "
+              "The newsletter may be empty or the feed format changed.")
+        raise SystemExit(1)
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     OUT_PATH.write_text(json.dumps(posts, indent=2, ensure_ascii=False))
     print(f"Ingested {len(posts)} posts -> {OUT_PATH}")

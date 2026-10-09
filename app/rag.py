@@ -43,6 +43,30 @@ RELEVANCE_THRESHOLD = float(os.environ.get("RAG_RELEVANCE_THRESHOLD", "0.78"))
 OPENAI_MODEL = os.environ.get("RAG_OPENAI_MODEL", "gpt-4o-mini")
 HF_MODEL = os.environ.get("RAG_HF_MODEL", "google/flan-t5-base")
 
+# Day 6: cap absurdly long questions before they hit the embedder/LLM.
+MAX_QUESTION_CHARS = 2000
+MAX_TOP_K = 10
+
+
+# ---------------------------------------------------------------------------
+# Errors (Day 6: typed errors so callers can show friendly messages)
+# ---------------------------------------------------------------------------
+
+class RAGError(Exception):
+    """Base class for all errors raised by the RAG pipeline."""
+
+
+class IndexNotFoundError(RAGError):
+    """The ChromaDB index has not been built yet."""
+
+
+class ModelLoadError(RAGError):
+    """An embedding or LLM model could not be loaded (often network)."""
+
+
+class BackendError(RAGError):
+    """An answering backend failed to initialize or generate."""
+
 
 # ---------------------------------------------------------------------------
 # Retrieval
@@ -62,17 +86,34 @@ class Retriever:
     """Loads the Day 2 ChromaDB index once, then answers similarity queries."""
 
     def __init__(self) -> None:
-        from sentence_transformers import SentenceTransformer
-        import chromadb
-
         if not CHROMA_DIR.exists():
-            raise FileNotFoundError(
+            raise IndexNotFoundError(
                 f"Index not found at {CHROMA_DIR}. "
                 "Run scripts/build_index.py first."
             )
-        self._embedder = SentenceTransformer(EMBED_MODEL)
-        client = chromadb.PersistentClient(path=str(CHROMA_DIR))
-        self._collection = client.get_collection(COLLECTION_NAME)
+        try:
+            from sentence_transformers import SentenceTransformer
+            import chromadb
+        except ImportError as exc:
+            raise ModelLoadError(
+                "Required packages are missing. "
+                "Run: pip install -r requirements.txt"
+            ) from exc
+        try:
+            self._embedder = SentenceTransformer(EMBED_MODEL)
+        except Exception as exc:
+            raise ModelLoadError(
+                f"Could not load embedding model {EMBED_MODEL!r}. "
+                "Check your network connection and try again."
+            ) from exc
+        try:
+            client = chromadb.PersistentClient(path=str(CHROMA_DIR))
+            self._collection = client.get_collection(COLLECTION_NAME)
+        except Exception as exc:
+            raise IndexNotFoundError(
+                f"Could not open the index at {CHROMA_DIR}. "
+                "It may be corrupted; try scripts/build_index.py --recreate."
+            ) from exc
 
     def retrieve(self, query: str, top_k: int = DEFAULT_TOP_K
                  ) -> list[RetrievedChunk]:
@@ -247,21 +288,42 @@ class ExtractiveBackend(LLMBackend):
 
 
 def get_backend(name: str = "auto") -> LLMBackend:
-    """Resolve a backend name to an instance, falling back gracefully."""
+    """Resolve a backend name to an instance, falling back gracefully.
+
+    Raises BackendError with an actionable message when the requested
+    backend cannot start (missing key, failed model download, ...).
+    """
     name = name.lower()
     if name == "auto":
         if os.environ.get("OPENAI_API_KEY"):
-            return OpenAIBackend()
+            return _init_backend(OpenAIBackend)
         try:
-            return HFBackend()
-        except Exception:
+            return _init_backend(HFBackend)
+        except BackendError:
             return ExtractiveBackend()
     backends = {"openai": OpenAIBackend, "hf": HFBackend,
                 "extractive": ExtractiveBackend}
     if name not in backends:
         raise ValueError(f"Unknown backend {name!r}. "
                          f"Choose from: auto, {', '.join(backends)}")
-    return backends[name]()
+    return _init_backend(backends[name])
+
+
+def _init_backend(cls: type[LLMBackend]) -> LLMBackend:
+    """Instantiate a backend, converting failures into BackendError."""
+    try:
+        return cls()
+    except RAGError:
+        raise
+    except Exception as exc:
+        hint = {
+            "openai": "Is OPENAI_API_KEY set and valid?",
+            "hf": ("Could not download the HuggingFace model. "
+                   "Check your network connection and try again."),
+        }.get(getattr(cls, "name", ""), "Check the logs and try again.")
+        raise BackendError(
+            f"Backend {cls.name!r} failed to start. {hint}"
+        ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -270,7 +332,8 @@ def get_backend(name: str = "auto") -> LLMBackend:
 
 def answer_question(question: str, top_k: int = DEFAULT_TOP_K,
                     backend: str = "auto",
-                    max_distance: float = RELEVANCE_THRESHOLD) -> Answer:
+                    max_distance: float = RELEVANCE_THRESHOLD,
+                    retriever: "Retriever | None" = None) -> Answer:
     """Retrieve relevant chunks and generate a cited answer.
 
     Returns an Answer with .text (citations as [1], [2], ...) and .sources
@@ -280,10 +343,24 @@ def answer_question(question: str, top_k: int = DEFAULT_TOP_K,
     max_distance, the newsletter is treated as not covering the question
     and a graceful abstention is returned instead of answering from
     irrelevant passages.
+
+    Day 6: pass an already-loaded Retriever to skip reloading the
+    embedding model on every call. Raises ValueError on invalid input
+    and RAGError subclasses on index/model/backend failures.
     """
-    retriever = Retriever()
-    if not question.strip():
+    question = (question or "").strip()
+    if not question:
         return Answer(text="Please ask a question.", backend=backend)
+    if len(question) > MAX_QUESTION_CHARS:
+        raise ValueError(
+            f"Question is too long ({len(question)} chars; "
+            f"max {MAX_QUESTION_CHARS}). Please shorten it."
+        )
+    if not 1 <= top_k <= MAX_TOP_K:
+        raise ValueError(
+            f"top_k must be between 1 and {MAX_TOP_K}, got {top_k}."
+        )
+    retriever = retriever or Retriever()
     chunks = retriever.retrieve(question, top_k=top_k)
     if not chunks:
         return Answer(text="The index is empty. Run scripts/ingest.py and "
@@ -326,9 +403,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         answer = answer_question(args.question, top_k=args.top_k,
                                  backend=args.backend)
-    except (FileNotFoundError, RuntimeError, ValueError) as exc:
+    except (RAGError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
+    except Exception as exc:  # unexpected: surface it, don't swallow it
+        print(f"Unexpected error: {exc}", file=sys.stderr)
+        return 2
     print(format_answer(answer))
     return 0
 

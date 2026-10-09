@@ -1,0 +1,191 @@
+{
+  "backend": "extractive",
+  "questions": [
+    {
+      "id": "q1",
+      "type": "in_scope",
+      "question": "How do I clean messy Excel data with pandas?",
+      "crashed": false,
+      "error": null,
+      "retrieved_titles": [
+        "How to clean messy Excel data in 10 minutes with pandas",
+        "I finally started the newsletter I kept putting off",
+        "Your first data job doesn't need machine learning"
+      ],
+      "best_distance": 0.3165876865386963,
+      "answer_preview": "Based on the newsletter, here is what I found:\n\n[1] How to clean messy Excel data in 10 minutes with pandas Every messy Excel file has the same five problems. Here is the exact sequence I run, in order, every single time. Thanks for reading Learn with Jashwanth! Subscribe for free to receive new posts and support my work. STEP 1: INSPECT (2 MINUTES) df = pd.read_excel('messy.xlsx') print(df.shape)",
+      "answer_backend": "extractive",
+      "retrieval_hit": true,
+      "keyword_coverage": 1.0,
+      "citations": true,
+      "abstained": null
+    },
+    {
+      "id": "q2",
+      "type": "in_scope",
+      "question": "What is the first step when you receive a messy Excel file?",
+      "crashed": false,
+      "error": null,
+      "retrieved_titles": [
+        "How to clean messy Excel data in 10 minutes with pandas",
+        "I finally started the newsletter I kept putting off",
+        "Your first data job doesn't need machine learning"
+      ],
+      "best_distance": 0.6184999942779541,
+      "answer_preview": "Based on the newsletter, here is what I found:\n\n[1] How to clean messy Excel data in 10 minutes with pandas Every messy Excel file has the same five problems. Here is the exact sequence I run, in order, every single time. Thanks for reading Learn with Jashwanth! Subscribe for free to receive new posts and support my work. STEP 1: INSPECT (2 MINUTES) df = pd.read_excel('messy.xlsx') print(df.shape)",
+      "answer_backend": "extractive",
+      "retrieval_hit": true,
+      "keyword_coverage": 1.0,
+      "citations": true,
+      "abstained": null
+    },
+    {
+      "id": "q3",
+      "type": "in_scope",
+      "question": "Do I need machine learning to land my first data job?",
+      "crashed": false,
+      "error": null,
+      "retrieved_titles": [
+        "Your first data job doesn't need machine learning",
+        "I finally started the newsletter I kept putting off",
+        "How to clean messy Excel data in 10 minutes with pandas"
+      ],
+      "best_distance": 0.3109363317489624,
+      "answer_preview": "Based on the newsletter, here is what I found:\n\n[1] Your first data job doesn't need machine learning I spent three months learning neural networks before I could write a proper JOIN. That was backwards, and it cost me interviews. THE CLAIM Most beginners study machine learning before they can query a database. I did the same. Here is my claim: SQL will get you hired, machine learning will get you",
+      "answer_backend": "extractive",
+      "retrieval_hit": true,
+      "keyword_coverage": 1.0,
+      "citations": true,
+      "abstained": null
+    },
+    {
+      "id": "q4",
+      "type": "in_scope",
+      "question": "Why do beginners study neural networks before they can write a proper JOIN?",
+      "crashed": false,
+      "error": null,
+      "retrieved_titles": [
+        "Your first data job doesn't need machine learning",
+        "I finally started the newsletter I kept putting off",
+        "How to clean messy Excel data in 10 minutes with pandas"
+      ],
+      "best_distance": 0.5555906295776367,
+      "answer_preview": "Based on the newsletter, here is what I found:\n\n[1] Your first data job doesn't need machine learning I spent three months learning neural networks before I could write a proper JOIN. That was backwards, and it cost me interviews. THE CLAIM Most beginners study machine learning before they can query a database. I did the same. Here is my claim: SQL will get you hired, machine learning will get you",
+      "answer_backend": "extractive",
+      "retrieval_hit": true,
+      "keyword_coverage": 1.0,
+      "citations": true,
+      "abstained": null
+    },
+    {
+      "id": "q5",
+      "type": "in_scope",
+      "question": "What topics does the Learn with Jashwanth newsletter cover?",
+      "crashed": false,
+      "error": null,
+      "retrieved_titles": [
+        "I finally started the newsletter I kept putting off",
+        "Your first data job doesn't need machine learning",
+        "How to clean messy Excel data in 10 minutes with pandas"
+      ],
+      "best_distance": 0.5132244229316711,
+      "answer_preview": "Based on the newsletter, here is what I found:\n\n[1] I finally started the newsletter I kept putting off Hey, Jashwanth here. For months I've been sharing data tips, AI workflows, and career resources with 10,000+ of you on LinkedIn. And every week someone asks me: \"where can I learn all of this properly, in one place?\" So here it is: Learn with Jashwanth , my new home for everything I learn, build",
+      "answer_backend": "extractive",
+      "retrieval_hit": true,
+      "keyword_coverage": 0.75,
+      "citations": true,
+      "abstained": null
+    },
+    {
+      "id": "q6",
+      "type": "in_scope",
+      "question": "Why did Jashwanth start this newsletter?",
+      "crashed": false,
+      "error": null,
+      "retrieved_titles": [
+        "I finally started the newsletter I kept putting off",
+        "Your first data job doesn't need machine learning",
+        "How to clean messy Excel data in 10 minutes with pandas"
+      ],
+      "best_distance": 0.7194092273712158,
+      "answer_preview": "Based on the newsletter, here is what I found:\n\n[1] I finally started the newsletter I kept putting off Hey, Jashwanth here. For months I've been sharing data tips, AI workflows, and career resources with 10,000+ of you on LinkedIn. And every week someone asks me: \"where can I learn all of this properly, in one place?\" So here it is: Learn with Jashwanth , my new home for everything I learn, build",
+      "answer_backend": "extractive",
+      "retrieval_hit": true,
+      "keyword_coverage": 1.0,
+      "citations": true,
+      "abstained": null
+    },
+    {
+      "id": "q7",
+      "type": "out_of_scope",
+      "question": "What is the capital of France?",
+      "crashed": false,
+      "error": null,
+      "retrieved_titles": [
+        "How to clean messy Excel data in 10 minutes with pandas",
+        "Your first data job doesn't need machine learning",
+        "I finally started the newsletter I kept putting off"
+      ],
+      "best_distance": 0.9378262758255005,
+      "answer_preview": "The Learn with Jashwanth newsletter does not cover that topic. So far it covers: 'How to clean messy Excel data in 10 minutes with pandas', 'Your first data job doesn't need machine learning', 'I finally started the newsletter I kept putting off'. Try asking about one of those.",
+      "answer_backend": "relevance-gate",
+      "retrieval_hit": null,
+      "keyword_coverage": null,
+      "citations": false,
+      "abstained": true
+    },
+    {
+      "id": "q8",
+      "type": "out_of_scope",
+      "question": "How do I train a neural network with PyTorch on a GPU cluster?",
+      "crashed": false,
+      "error": null,
+      "retrieved_titles": [
+        "I finally started the newsletter I kept putting off",
+        "Your first data job doesn't need machine learning",
+        "How to clean messy Excel data in 10 minutes with pandas"
+      ],
+      "best_distance": 0.8130019903182983,
+      "answer_preview": "The Learn with Jashwanth newsletter does not cover that topic. So far it covers: 'I finally started the newsletter I kept putting off', 'Your first data job doesn't need machine learning', 'How to clean messy Excel data in 10 minutes with pandas'. Try asking about one of those.",
+      "answer_backend": "relevance-gate",
+      "retrieval_hit": null,
+      "keyword_coverage": null,
+      "citations": false,
+      "abstained": true
+    },
+    {
+      "id": "q9",
+      "type": "edge_empty",
+      "question": "",
+      "crashed": false,
+      "error": null,
+      "retrieved_titles": [],
+      "best_distance": null,
+      "answer_preview": "Please ask a question.",
+      "answer_backend": "extractive",
+      "retrieval_hit": null,
+      "keyword_coverage": 1.0,
+      "citations": false,
+      "abstained": null
+    },
+    {
+      "id": "q10",
+      "type": "edge_gibberish",
+      "question": "asdf qwer zxcv blorp",
+      "crashed": false,
+      "error": null,
+      "retrieved_titles": [
+        "I finally started the newsletter I kept putting off",
+        "How to clean messy Excel data in 10 minutes with pandas",
+        "Your first data job doesn't need machine learning"
+      ],
+      "best_distance": 0.92544025182724,
+      "answer_preview": "The Learn with Jashwanth newsletter does not cover that topic. So far it covers: 'I finally started the newsletter I kept putting off', 'How to clean messy Excel data in 10 minutes with pandas', 'Your first data job doesn't need machine learning'. Try asking about one of those.",
+      "answer_backend": "relevance-gate",
+      "retrieval_hit": null,
+      "keyword_coverage": null,
+      "citations": false,
+      "abstained": true
+    }
+  ]
+}

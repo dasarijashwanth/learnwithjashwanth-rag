@@ -42,7 +42,18 @@ def chunk_text(text: str, chunk_words: int = CHUNK_WORDS,
 
 def load_chunks() -> tuple[list[str], list[dict]]:
     """Load posts and return (documents, metadatas) for every chunk."""
-    posts = json.loads(POSTS_PATH.read_text())
+    if not POSTS_PATH.exists():
+        raise SystemExit(
+            f"Error: {POSTS_PATH} not found. "
+            "Run scripts/ingest.py first."
+        )
+    try:
+        posts = json.loads(POSTS_PATH.read_text())
+    except json.JSONDecodeError as exc:
+        raise SystemExit(
+            f"Error: {POSTS_PATH} is not valid JSON ({exc}). "
+            "Re-run scripts/ingest.py to regenerate it."
+        ) from exc
     documents, metadatas = [], []
     for post in posts:
         for i, chunk in enumerate(chunk_text(post["text"])):
@@ -63,7 +74,14 @@ def build_index(recreate: bool = False) -> None:
         return
 
     print(f"Embedding {len(documents)} chunks with {EMBED_MODEL} ...")
-    model = SentenceTransformer(EMBED_MODEL)
+    try:
+        model = SentenceTransformer(EMBED_MODEL)
+    except Exception as exc:
+        raise SystemExit(
+            f"Error: could not download/load embedding model "
+            f"{EMBED_MODEL!r} ({exc}). Check your network connection "
+            "and try again."
+        ) from exc
     embeddings = model.encode(documents, batch_size=32,
                              show_progress_bar=True).tolist()
 
