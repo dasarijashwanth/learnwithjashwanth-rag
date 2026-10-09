@@ -32,7 +32,8 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 CHROMA_DIR = BASE_DIR / "data" / "chroma"
-COLLECTION_NAME = "learnwithjashwanth"
+COLLECTION_NAME = "learnwithjashwanth"   # demo: his Substack newsletter
+USER_COLLECTION_NAME = "user_documents"  # user-provided content
 EMBED_MODEL = "all-MiniLM-L6-v2"
 DEFAULT_TOP_K = 5
 # Day 5: cosine-distance gate. Chunks scoring worse (higher) than this are
@@ -83,14 +84,16 @@ class RetrievedChunk:
 
 
 class Retriever:
-    """Loads the Day 2 ChromaDB index once, then answers similarity queries.
+    """Loads a ChromaDB collection once, then answers similarity queries.
 
     Day 7: self-healing index. On a fresh deploy (e.g. Streamlit Cloud) the
-    chroma directory is not committed, so if it is missing the index is
-    built automatically from the committed data/posts.json on first use.
+    chroma directory is not committed, so if the demo collection is missing
+    the index is built automatically from the committed data/posts.json on
+    first use. User collections start empty and are created on first write.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, collection_name: str = COLLECTION_NAME) -> None:
+        self.collection_name = collection_name
         try:
             from sentence_transformers import SentenceTransformer
             import chromadb
@@ -99,7 +102,8 @@ class Retriever:
                 "Required packages are missing. "
                 "Run: pip install -r requirements.txt"
             ) from exc
-        if not CHROMA_DIR.exists():
+        if (collection_name == COLLECTION_NAME
+                and not CHROMA_DIR.exists()):
             self._build_index_from_posts()
         try:
             self._embedder = SentenceTransformer(EMBED_MODEL)
@@ -110,7 +114,10 @@ class Retriever:
             ) from exc
         try:
             client = chromadb.PersistentClient(path=str(CHROMA_DIR))
-            self._collection = client.get_collection(COLLECTION_NAME)
+            self._collection = client.get_or_create_collection(
+                name=collection_name,
+                metadata={"hnsw:space": "cosine"},
+            )
         except Exception as exc:
             raise IndexNotFoundError(
                 f"Could not open the index at {CHROMA_DIR}. "
@@ -171,24 +178,104 @@ class Retriever:
 
 
 # ---------------------------------------------------------------------------
+# Indexing user documents
+# ---------------------------------------------------------------------------
+
+def index_documents(docs: "list[SourceDocument]",
+                    collection_name: str = USER_COLLECTION_NAME,
+                    recreate: bool = False) -> int:
+    """Chunk and index user-provided documents into a Chroma collection.
+
+    Returns the number of chunks indexed. Raises RAGError subclasses on
+    model/index failures and ValueError when there is nothing to index.
+    """
+    if not docs:
+        raise ValueError("No documents to index.")
+    try:
+        from sentence_transformers import SentenceTransformer
+        import chromadb
+    except ImportError as exc:
+        raise ModelLoadError(
+            "Required packages are missing. "
+            "Run: pip install -r requirements.txt"
+        ) from exc
+    if str(BASE_DIR) not in sys.path:
+        sys.path.insert(0, str(BASE_DIR))
+    from scripts.build_index import CHUNK_OVERLAP, CHUNK_WORDS, chunk_text
+
+    documents, metadatas = [], []
+    for doc in docs:
+        for i, chunk in enumerate(
+                chunk_text(doc.text, CHUNK_WORDS, CHUNK_OVERLAP)):
+            documents.append(f"{doc.title}\n\n{chunk}")
+            metadatas.append({
+                "title": doc.title,
+                "url": doc.url,
+                "published": "",
+                "chunk": i,
+            })
+    if not documents:
+        raise ValueError("The documents contained no indexable text.")
+    try:
+        model = SentenceTransformer(EMBED_MODEL)
+    except Exception as exc:
+        raise ModelLoadError(
+            f"Could not load embedding model {EMBED_MODEL!r}. "
+            "Check your network connection and try again."
+        ) from exc
+    embeddings = model.encode(documents, batch_size=32).tolist()
+
+    client = chromadb.PersistentClient(path=str(CHROMA_DIR))
+    if recreate:
+        try:
+            client.delete_collection(collection_name)
+        except Exception:
+            pass
+    collection = client.get_or_create_collection(
+        name=collection_name,
+        metadata={"hnsw:space": "cosine"},
+    )
+    start = collection.count()
+    ids = [f"userdoc-{start + i}" for i in range(len(documents))]
+    collection.upsert(ids=ids, documents=documents,
+                      metadatas=metadatas, embeddings=embeddings)
+    return len(documents)
+
+
+def clear_collection(collection_name: str) -> None:
+    """Delete every chunk in a collection (used for "start over")."""
+    try:
+        import chromadb
+    except ImportError as exc:
+        raise ModelLoadError(
+            "Required packages are missing. "
+            "Run: pip install -r requirements.txt"
+        ) from exc
+    client = chromadb.PersistentClient(path=str(CHROMA_DIR))
+    try:
+        client.delete_collection(collection_name)
+    except Exception:
+        pass  # already empty / never created
+
+
+# ---------------------------------------------------------------------------
 # Prompt
 # ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT = (
-    "You are a helpful assistant that answers questions about the "
-    "'Learn with Jashwanth' newsletter using ONLY the numbered context "
-    "entries below.\n"
+    "You are a helpful assistant that answers questions using ONLY the "
+    "numbered context entries below.\n"
     "Rules:\n"
-    "- Answer in the newsletter's friendly, practical tone. Be concise.\n"
+    "- Be friendly, practical, and concise.\n"
     "- Attach a citation like [1] or [2] to EVERY factual sentence, "
     "matching the numbered context entries. Never cite a number that was "
     "not given to you.\n"
-    "- Never invent post titles, URLs, or details that are not in the "
+    "- Never invent titles, URLs, or details that are not in the "
     "context.\n"
     "- If the context covers only part of the question, answer that part "
     "and plainly say which part is not covered.\n"
     "- If the context does not cover the question at all, say so in one "
-    "sentence, do not invent details, and suggest what the newsletter "
+    "sentence, do not invent details, and suggest what the collection "
     "does cover instead."
 )
 
@@ -363,14 +450,15 @@ def _init_backend(cls: type[LLMBackend]) -> LLMBackend:
 def answer_question(question: str, top_k: int = DEFAULT_TOP_K,
                     backend: str = "auto",
                     max_distance: float = RELEVANCE_THRESHOLD,
-                    retriever: "Retriever | None" = None) -> Answer:
+                    retriever: "Retriever | None" = None,
+                    collection_label: str = "this collection") -> Answer:
     """Retrieve relevant chunks and generate a cited answer.
 
     Returns an Answer with .text (citations as [1], [2], ...) and .sources
     (the RetrievedChunk list the numbers refer to).
 
     Relevance gate (Day 5): if even the best chunk scores worse than
-    max_distance, the newsletter is treated as not covering the question
+    max_distance, the collection is treated as not covering the question
     and a graceful abstention is returned instead of answering from
     irrelevant passages.
 
@@ -393,14 +481,14 @@ def answer_question(question: str, top_k: int = DEFAULT_TOP_K,
     retriever = retriever or Retriever()
     chunks = retriever.retrieve(question, top_k=top_k)
     if not chunks:
-        return Answer(text="The index is empty. Run scripts/ingest.py and "
-                           "scripts/build_index.py first.",
+        return Answer(text=("This collection is empty. Add some documents "
+                            "first, then ask away."),
                       backend=backend)
     if chunks[0].score > max_distance:
         topics = ", ".join(f"'{t}'" for t in
                            dict.fromkeys(c.title for c in chunks))
         return Answer(
-            text=("The Learn with Jashwanth newsletter does not cover "
+            text=(f"{collection_label} does not cover "
                   f"that topic. So far it covers: {topics}. "
                   "Try asking about one of those."),
             sources=[],

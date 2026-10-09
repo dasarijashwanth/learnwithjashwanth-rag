@@ -1,16 +1,21 @@
-# Learn with Jashwanth RAG Chatbot
+# RAG Chatbot — chat with your own documents
 
-A retrieval-augmented generation chatbot that answers questions grounded in the [Learn with Jashwanth](https://learnwithjashwanth.substack.com) newsletter. Ask anything about the posts, get answers with cited sources, not hallucinations.
+A retrieval-augmented generation chatbot anyone can point at their own material: upload PDFs, text files, or Markdown; paste a web page URL; or paste raw text. The app chunks, embeds, and indexes the content, then answers questions with cited sources, not hallucinations.
+
+The [Learn with Jashwanth](https://learnwithjashwanth.substack.com) newsletter ships as the built-in demo collection so first-time visitors see it working immediately.
 
 Built as Week 1 of a weekly portfolio project series: one production-grade data/AI project per week, built in daily slices.
+
+**Live demo:** https://learnwithjashwanth-rag-ilswex5xz8ea5mewpgg2b9.streamlit.app/
 
 
 ## Features
 
-- **Grounded answers with citations.** Every factual claim links back to the exact newsletter post it came from (title + URL).
+- **Bring your own content.** PDF / TXT / Markdown uploads, web page URLs (article text extraction), and pasted text, all indexed into your own collection from the sidebar.
+- **Grounded answers with citations.** Every factual claim links back to the exact source it came from (title + URL).
 - **Honest abstention.** A relevance gate (cosine distance threshold, calibrated on the eval set) makes the bot say "not covered" instead of inventing answers for out-of-scope questions.
 - **Two answer backends.** Extractive (deterministic, no API key) and HuggingFace seq2seq, switchable from the UI sidebar.
-- **Streamlit chat UI.** Suggested starter questions, cited Sources expander per answer, chunk-count slider, and index stats in the sidebar.
+- **Streamlit chat UI.** Collection picker (demo vs. your documents), suggested starter questions, cited Sources expander per answer, chunk-count slider, and index stats in the sidebar.
 - **Eval harness.** 10-question eval set measuring retrieval hit rate, keyword coverage, citation presence, abstention behavior, and crash-freedom, with before/after tuning results.
 - **Answer caching.** The Streamlit UI caches answers (per question + backend + top-k) and shares one loaded retriever across calls, so repeat questions are instant and no model is reloaded per question.
 - **Friendly error handling.** Typed errors (`IndexNotFoundError`, `ModelLoadError`, `BackendError`) surface actionable messages; the UI keeps chat history intact and offers a clear-cache-and-retry action.
@@ -18,13 +23,13 @@ Built as Week 1 of a weekly portfolio project series: one production-grade data/
 ## How it works
 
 ```
-Substack RSS  →  ingest  →  chunk + embed  →  ChromaDB index  →  retrieve  →  answer (cited)
+Your docs / Substack RSS  →  ingest  →  chunk + embed  →  ChromaDB index  →  retrieve  →  answer (cited)
 ```
 
-1. **Ingest** (`scripts/ingest.py`): pulls every post from the Substack RSS feed into `data/posts.json` (title, date, URL, full text).
-2. **Index** (`scripts/build_index.py`): splits posts into overlapping chunks, embeds them with sentence-transformers, and stores vectors in a persistent ChromaDB collection.
+1. **Ingest** (`app/sources.py` for user uploads/URLs; `scripts/ingest.py` for the Substack RSS demo feed): extracts clean text into source documents (title, URL, full text).
+2. **Index** (`app/rag.py::index_documents`, or `scripts/build_index.py` for the demo): splits documents into overlapping chunks, embeds them with sentence-transformers, and stores vectors in a persistent ChromaDB collection (one per collection).
 3. **Answer** (`app/rag.py`): embeds the question, retrieves the top-k chunks, applies the relevance gate, and generates an answer constrained to the retrieved context, with per-source title/link citations.
-4. **Chat UI** (`app/app.py`): Streamlit interface. Ask a question, read the answer, expand Sources to verify every claim.
+4. **Chat UI** (`app/app.py`): Streamlit interface. Pick a collection, add your own content, ask a question, read the answer, expand Sources to verify every claim.
 5. **Evaluate** (`eval/run_eval.py`): scores the system on `eval/eval_questions.json`. See [eval/README.md](eval/README.md) for methodology and results.
 
 ## Tech stack
@@ -36,14 +41,15 @@ Substack RSS  →  ingest  →  chunk + embed  →  ChromaDB index  →  retriev
 | Vector store | ChromaDB (persistent local) |
 | Answer backends | Extractive (built-in) / HuggingFace seq2seq |
 | UI | Streamlit |
-| Ingestion | feedparser (Substack RSS) |
+| Ingestion | feedparser (Substack RSS demo), pypdf, readability-lxml |
 
 ## Project structure
 
 ```
 ├── app/
-│   ├── app.py          # Streamlit chat UI
-│   └── rag.py          # retrieval + answer engine, relevance gate, backends
+│   ├── app.py          # Streamlit chat UI (collections, uploads, Q&A)
+│   ├── rag.py          # retrieval + answer engine, relevance gate, backends
+│   └── sources.py      # user content ingestion: PDF/TXT/MD, URLs, pasted text
 ├── scripts/
 │   ├── ingest.py       # RSS → data/posts.json
 │   ├── build_index.py  # chunk + embed → ChromaDB
