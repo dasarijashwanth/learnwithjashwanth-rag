@@ -19,7 +19,7 @@ import traceback
 
 import streamlit as st
 
-from rag import RAGError, Retriever
+from rag import RAGError, Retriever, answer_question
 
 # ---------------------------------------------------------------------------
 # Page config
