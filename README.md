@@ -8,6 +8,8 @@ Built as Week 1 of a weekly portfolio project series: one production-grade data/
 
 **Live demo:** https://learnwithjashwanth-rag-ilswex5xz8ea5mewpgg2b9.streamlit.app/
 
+**Launch announcements:** [LinkedIn post](https://www.linkedin.com/feed/update/urn:li:share:7514826295290269696/) · [Substack note](https://learnwithjashwanth.substack.com/p/my-week-1-project-turned-into-a-real)
+
 
 ## Features
 
